@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect } from 'react';
 import { 
   Phone, 
   Mail, 
@@ -19,19 +19,40 @@ import {
   Twitter,
   Youtube,
   Linkedin,
-  ArrowDown
+  ArrowDown,
+  AlertCircle
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
+import { auth, db } from './firebase';
+import { 
+  signInWithPopup, 
+  GoogleAuthProvider, 
+  onAuthStateChanged, 
+  signOut,
+  User,
+  browserPopupRedirectResolver
+} from 'firebase/auth';
+import { 
+  collection, 
+  addDoc, 
+  onSnapshot, 
+  query, 
+  orderBy, 
+  deleteDoc, 
+  doc,
+  Timestamp
+} from 'firebase/firestore';
 
 // --- Types ---
 interface Inquiry {
-  id: number;
+  id: string;
   name: string;
   email: string;
   phone: string;
   division: string;
   message: string;
   date: string;
+  createdAt: number;
 }
 
 interface ServiceDetail {
@@ -132,59 +153,122 @@ export default function App() {
   const [activeModal, setActiveModal] = useState<string | null>(null);
   const [showAdminLogin, setShowAdminLogin] = useState(false);
   const [isAdminLoggedIn, setIsAdminLoggedIn] = useState(false);
+  const [user, setUser] = useState<User | null>(null);
   const [inquiries, setInquiries] = useState<Inquiry[]>([]);
-  const [formStatus, setFormStatus] = useState<'idle' | 'success'>('idle');
+  const [formStatus, setFormStatus] = useState<'idle' | 'success' | 'error'>('idle');
   const [mobileMenu, setMobileMenu] = useState(false);
-
-  // Admin Credentials
-  const [adminUser, setAdminUser] = useState('');
-  const [adminPass, setAdminPass] = useState('');
+  const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [isLoggingIn, setIsLoggingIn] = useState(false);
+  const [loginError, setLoginError] = useState<string | null>(null);
 
   useEffect(() => {
     const handleScroll = () => setScrolled(window.scrollY > 60);
     window.addEventListener('scroll', handleScroll);
     
-    // Load inquiries from localStorage
-    const saved = localStorage.getItem('si_inquiries');
-    if (saved) setInquiries(JSON.parse(saved));
+    // Auth Listener
+    const unsubscribeAuth = onAuthStateChanged(auth, (currentUser) => {
+      setUser(currentUser);
+      const adminEmails = ['arjunlaptop7507@gmail.com', 'sunriseindustry10@gmail.com'];
+      if (currentUser && currentUser.email && adminEmails.includes(currentUser.email)) {
+        setIsAdminLoggedIn(true);
+      } else {
+        setIsAdminLoggedIn(false);
+      }
+    });
 
-    return () => window.removeEventListener('scroll', handleScroll);
+    return () => {
+      window.removeEventListener('scroll', handleScroll);
+      unsubscribeAuth();
+    };
   }, []);
 
-  const handleContactSubmit = (e: React.FormEvent<HTMLFormElement>) => {
+  useEffect(() => {
+    if (!isAdminLoggedIn) {
+      setInquiries([]);
+      return;
+    }
+
+    // Inquiries Listener - only for admin
+    const q = query(collection(db, 'inquiries'), orderBy('createdAt', 'desc'));
+    const unsubscribeInquiries = onSnapshot(q, (snapshot) => {
+      const data = snapshot.docs.map(doc => ({
+        id: doc.id,
+        ...doc.data()
+      })) as Inquiry[];
+      setInquiries(data);
+    }, (error) => {
+      if (error.code !== 'permission-denied') {
+        console.error("Firestore Error:", error);
+      }
+    });
+
+    return () => unsubscribeInquiries();
+  }, [isAdminLoggedIn]);
+
+  const handleContactSubmit = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     const formData = new FormData(e.currentTarget);
-    const newInquiry: Inquiry = {
-      id: Date.now(),
-      name: formData.get('name') as string,
-      email: formData.get('email') as string,
-      phone: formData.get('phone') as string || '—',
-      division: formData.get('division') as string || 'General',
-      message: formData.get('message') as string,
-      date: new Date().toLocaleDateString('en-IN'),
-    };
+    
+    try {
+      await addDoc(collection(db, 'inquiries'), {
+        name: formData.get('name') as string,
+        email: formData.get('email') as string,
+        phone: formData.get('phone') as string || '—',
+        division: formData.get('division') as string || 'General',
+        message: formData.get('message') as string,
+        date: new Date().toLocaleDateString('en-IN'),
+        createdAt: Date.now()
+      });
 
-    const updated = [newInquiry, ...inquiries];
-    setInquiries(updated);
-    localStorage.setItem('si_inquiries', JSON.stringify(updated));
-    setFormStatus('success');
-    e.currentTarget.reset();
-    setTimeout(() => setFormStatus('idle'), 5000);
+      setFormStatus('success');
+      e.currentTarget.reset();
+      setTimeout(() => setFormStatus('idle'), 5000);
+    } catch (error) {
+      console.error("Submission Error:", error);
+      setFormStatus('error');
+      setTimeout(() => setFormStatus('idle'), 5000);
+    }
   };
 
-  const deleteInquiry = (id: number) => {
-    if (!confirm('Delete this inquiry?')) return;
-    const updated = inquiries.filter(i => i.id !== id);
-    setInquiries(updated);
-    localStorage.setItem('si_inquiries', JSON.stringify(updated));
+  const deleteInquiry = async (id: string) => {
+    try {
+      await deleteDoc(doc(db, 'inquiries', id));
+      setDeletingId(null);
+    } catch (error) {
+      console.error("Delete Error:", error);
+    }
   };
 
-  const loginAdmin = () => {
-    if (adminUser === 'admin' && adminPass === 'sunrise2016') {
-      setIsAdminLoggedIn(true);
+  const loginAdmin = async () => {
+    if (isLoggingIn) return;
+    setIsLoggingIn(true);
+    setLoginError(null);
+    const provider = new GoogleAuthProvider();
+    try {
+      await signInWithPopup(auth, provider, browserPopupRedirectResolver);
       setShowAdminLogin(false);
-    } else {
-      alert('Invalid credentials. (admin / sunrise2016)');
+    } catch (error: any) {
+      console.error("Login Error:", error);
+      if (error.code === 'auth/popup-blocked') {
+        setLoginError("Popup blocked! Please allow popups for this site and try again.");
+      } else if (error.code === 'auth/cancelled-popup-request') {
+        setLoginError("Login attempt cancelled. Please try again.");
+      } else if (error.code === 'auth/popup-closed-by-user') {
+        setLoginError("Login window was closed. Please try again.");
+      } else {
+        setLoginError("Login failed. Please try again.");
+      }
+    } finally {
+      setIsLoggingIn(false);
+    }
+  };
+
+  const logoutAdmin = async () => {
+    try {
+      await signOut(auth);
+      setIsAdminLoggedIn(false);
+    } catch (error) {
+      console.error("Logout Error:", error);
     }
   };
 
@@ -676,23 +760,23 @@ export default function App() {
                   <div className="bg-slate-50 p-8 rounded-2xl border border-slate-100">
                     <h3 className="font-serif text-xl font-bold text-green-dark mb-2">Quick Enquiry</h3>
                     <p className="text-xs text-slate-500 mb-6">Interested in this service? Leave your details and we'll get back to you.</p>
-                    <form className="space-y-4" onSubmit={(e) => {
+                    <form className="space-y-4" onSubmit={async (e) => {
                       e.preventDefault();
                       const fd = new FormData(e.currentTarget);
-                      const inq: Inquiry = {
-                        id: Date.now(),
-                        name: fd.get('name') as string,
-                        email: fd.get('email') as string,
-                        phone: fd.get('phone') as string || '—',
-                        division: SERVICES[activeModal!].title,
-                        message: fd.get('req') as string,
-                        date: new Date().toLocaleDateString('en-IN'),
-                      };
-                      const updated = [inq, ...inquiries];
-                      setInquiries(updated);
-                      localStorage.setItem('si_inquiries', JSON.stringify(updated));
-                      alert('Enquiry submitted successfully!');
-                      e.currentTarget.reset();
+                      try {
+                        await addDoc(collection(db, 'inquiries'), {
+                          name: fd.get('name') as string,
+                          email: fd.get('email') as string,
+                          phone: fd.get('phone') as string || '—',
+                          division: SERVICES[activeModal!].title,
+                          message: fd.get('req') as string,
+                          date: new Date().toLocaleDateString('en-IN'),
+                          createdAt: Date.now()
+                        });
+                        e.currentTarget.reset();
+                      } catch (error) {
+                        console.error("Modal Submission Error:", error);
+                      }
                     }}>
                       <div className="space-y-1">
                         <label className="text-[10px] uppercase font-bold text-slate-400">Your Name</label>
@@ -729,28 +813,40 @@ export default function App() {
               exit={{ opacity: 0, scale: 0.9 }}
               className="relative w-full max-w-md bg-white p-10 rounded-3xl shadow-2xl"
             >
-              <h2 className="text-3xl font-serif font-bold text-slate-900 mb-2">Admin Login</h2>
-              <p className="text-sm text-slate-500 mb-8">Sunrise Industry Management Portal</p>
+              <div className="text-center mb-8">
+                <div className="w-16 h-16 bg-green-pale rounded-2xl flex items-center justify-center mx-auto mb-4">
+                  <LayoutDashboard className="text-green-main" size={32} />
+                </div>
+                <h2 className="text-2xl font-serif font-bold text-slate-900">Admin Portal</h2>
+                <p className="text-slate-400 text-sm mt-2">Sign in with your authorized Google account</p>
+              </div>
+
               <div className="space-y-4">
-                <input 
-                  type="text" 
-                  placeholder="Username" 
-                  className="w-full px-5 py-3.5 rounded-xl border border-slate-200 focus:border-green-main outline-none"
-                  value={adminUser}
-                  onChange={(e) => setAdminUser(e.target.value)}
-                />
-                <input 
-                  type="password" 
-                  placeholder="Password" 
-                  className="w-full px-5 py-3.5 rounded-xl border border-slate-200 focus:border-green-main outline-none"
-                  value={adminPass}
-                  onChange={(e) => setAdminPass(e.target.value)}
-                  onKeyDown={(e) => e.key === 'Enter' && loginAdmin()}
-                />
-                <button onClick={loginAdmin} className="w-full bg-green-main text-white py-4 rounded-xl font-bold uppercase tracking-widest text-xs shadow-xl shadow-green-main/20">
-                  Login →
+                {loginError && (
+                  <div className="bg-red-50 border border-red-100 p-4 rounded-xl flex items-start gap-3 mb-4">
+                    <AlertCircle className="text-red-500 shrink-0 mt-0.5" size={16} />
+                    <p className="text-red-600 text-xs font-medium leading-relaxed">{loginError}</p>
+                  </div>
+                )}
+                <button 
+                  onClick={loginAdmin} 
+                  disabled={isLoggingIn}
+                  className={`w-full bg-white border border-slate-200 text-slate-700 py-4 rounded-xl font-bold flex items-center justify-center gap-3 hover:bg-slate-50 transition-all shadow-sm ${isLoggingIn ? 'opacity-50 cursor-not-allowed' : ''}`}
+                >
+                  {isLoggingIn ? (
+                    <div className="w-5 h-5 border-2 border-slate-300 border-t-slate-600 rounded-full animate-spin" />
+                  ) : (
+                    <img src="https://www.google.com/favicon.ico" className="w-4 h-4" alt="Google" />
+                  )}
+                  {isLoggingIn ? 'Connecting...' : 'Continue with Google'}
                 </button>
-                <button onClick={() => setShowAdminLogin(false)} className="w-full text-slate-400 text-xs font-bold uppercase tracking-widest mt-4">
+                <button 
+                  onClick={() => {
+                    setShowAdminLogin(false);
+                    setLoginError(null);
+                  }} 
+                  className="w-full text-slate-400 text-xs font-bold uppercase tracking-widest mt-4"
+                >
                   Back to Website
                 </button>
               </div>
@@ -775,7 +871,7 @@ export default function App() {
                 <span className="text-[10px] uppercase tracking-widest opacity-50">Sunrise Industry Pvt Ltd</span>
               </div>
               <button 
-                onClick={() => setIsAdminLoggedIn(false)}
+                onClick={logoutAdmin}
                 className="flex items-center gap-2 bg-white/10 hover:bg-white/20 px-4 py-2 rounded-full text-xs font-bold transition-all"
               >
                 <LogOut size={14} /> Logout
@@ -836,12 +932,29 @@ export default function App() {
                             <td className="px-8 py-5 text-sm text-slate-600 max-w-xs truncate">{inq.message}</td>
                             <td className="px-8 py-5 text-xs text-slate-400">{inq.date}</td>
                             <td className="px-8 py-5">
-                              <button 
-                                onClick={() => deleteInquiry(inq.id)}
-                                className="text-red-400 hover:text-red-600 transition-colors"
-                              >
-                                <Trash2 size={18} />
-                              </button>
+                              {deletingId === inq.id ? (
+                                <div className="flex items-center gap-2">
+                                  <button 
+                                    onClick={() => deleteInquiry(inq.id)}
+                                    className="text-red-600 font-bold text-[10px] uppercase tracking-widest bg-red-50 px-2 py-1 rounded"
+                                  >
+                                    Confirm
+                                  </button>
+                                  <button 
+                                    onClick={() => setDeletingId(null)}
+                                    className="text-slate-400 font-bold text-[10px] uppercase tracking-widest"
+                                  >
+                                    Cancel
+                                  </button>
+                                </div>
+                              ) : (
+                                <button 
+                                  onClick={() => setDeletingId(inq.id)}
+                                  className="text-red-400 hover:text-red-600 transition-colors"
+                                >
+                                  <Trash2 size={18} />
+                                </button>
+                              )}
                             </td>
                           </tr>
                         ))
